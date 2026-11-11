@@ -8,11 +8,11 @@
 use anyhow::{Result, anyhow};
 use std::thread;
 use std::time::Duration;
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::{GlobalFree, HANDLE};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
-use windows_sys::Win32::System::Memory::{GHND, GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock};
+use windows_sys::Win32::System::Memory::{GHND, GlobalAlloc, GlobalLock, GlobalUnlock};
 
 const CF_DIB: u32 = 8;
 const CF_DIBV5: u32 = 17;
