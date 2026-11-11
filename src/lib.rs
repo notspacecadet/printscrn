@@ -24,6 +24,7 @@ use std::time::Instant;
 pub fn run() -> eframe::Result {
     platform::enable_dpi_awareness();
     log::init();
+    log::log(format!("version {}", env!("CARGO_PKG_VERSION")));
     install_panic_hook();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--self-check") {
@@ -94,7 +95,7 @@ pub fn run() -> eframe::Result {
         width,
         height,
     };
-    let native = eframe::NativeOptions {
+    let mut native = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Stillshot")
             .with_inner_size([460.0, 560.0])
@@ -105,6 +106,13 @@ pub fn run() -> eframe::Result {
         persist_window: false,
         ..Default::default()
     };
+    if cfg!(target_os = "windows") {
+        // Every overlay window is presented from inside the settings window's
+        // frame. With vsync each of those presents waits for its own vertical
+        // blank, so two monitors would halve the frame rate. The root frame
+        // is capped at about 60 Hz while a freeze is open.
+        native.glow_options.vsync = false;
+    }
     eframe::run_native(
         "Stillshot",
         native,

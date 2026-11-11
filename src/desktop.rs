@@ -74,6 +74,43 @@ pub fn initial_point_rect(
     }
 }
 
+/// Keep monitors from overlapping in the overlay's point space when they run
+/// at different scale factors.
+///
+/// Windows reports positions in physical pixels and [`initial_point_rect`]
+/// divides each monitor's position by that monitor's own scale. With one
+/// scale for every monitor that is exact. With mixed scales the divided
+/// rectangles can land on top of each other: a 1920-wide display at 100% next
+/// to a display at 200% puts the second one at x = 960, inside the first.
+/// A selection on one display would then also be cropped from the other.
+///
+/// Physical rectangles never overlap, and a monitor's point size is never
+/// larger than its pixel size, so anchoring each monitor at its physical
+/// position keeps them apart. Backends that already report points (macOS)
+/// are left alone.
+pub fn separate_mixed_scale_origins(shots: &mut [MonitorShot]) {
+    let scale = |shot: &MonitorShot| {
+        if shot.point_w > 0.0 {
+            shot.image.width() as f32 / shot.point_w
+        } else {
+            1.0
+        }
+    };
+    let Some(first) = shots.first().map(scale) else {
+        return;
+    };
+    if shots.iter().all(|shot| (scale(shot) - first).abs() < 0.01) {
+        return;
+    }
+    for shot in shots.iter_mut() {
+        let reported_physical = shot.raw_w > 0 && shot.image.width() <= shot.raw_w * 11 / 10;
+        if reported_physical {
+            shot.origin_x = shot.raw_x as f32;
+            shot.origin_y = shot.raw_y as f32;
+        }
+    }
+}
+
 pub fn crop(monitors: &[MonitorShot], sel: RectF) -> RgbaImage {
     let placed: Vec<PlacedMonitor> = monitors.iter().map(MonitorShot::placed).collect();
     crop_placed(monitors, &placed, sel)
@@ -203,6 +240,65 @@ mod tests {
         assert!((w - 2048.0).abs() < 0.01, "{w}");
         assert!((h - 1152.0).abs() < 0.01, "{h}");
         assert_eq!(y, 0.0);
+    }
+
+    #[test]
+    fn mixed_scale_monitors_do_not_overlap_in_point_space() {
+        // 1920x1080 at 100% on the left, 3840x2160 at 200% to its right.
+        let mut shots = vec![
+            MonitorShot {
+                name: "left".into(),
+                raw_x: 0,
+                raw_y: 0,
+                raw_w: 1920,
+                raw_h: 1080,
+                reported_scale: 1.0,
+                image: solid(1920, 1080, [1, 1, 1, 255]),
+                origin_x: 0.0,
+                origin_y: 0.0,
+                point_w: 1920.0,
+                point_h: 1080.0,
+            },
+            MonitorShot {
+                name: "right".into(),
+                raw_x: 1920,
+                raw_y: 0,
+                raw_w: 3840,
+                raw_h: 2160,
+                reported_scale: 2.0,
+                image: solid(3840, 2160, [2, 2, 2, 255]),
+                origin_x: 960.0,
+                origin_y: 0.0,
+                point_w: 1920.0,
+                point_h: 1080.0,
+            },
+        ];
+        assert!(shots[0].placed().rect().intersects(shots[1].placed().rect()));
+        separate_mixed_scale_origins(&mut shots);
+        assert!(!shots[0].placed().rect().intersects(shots[1].placed().rect()));
+        assert_eq!(shots[1].origin_x, 1920.0);
+        // A selection on the left display takes pixels from the left display only.
+        let cropped = crop(
+            &shots,
+            RectF {
+                x: 1000.0,
+                y: 10.0,
+                w: 50.0,
+                h: 20.0,
+            },
+        );
+        assert_eq!((cropped.width(), cropped.height()), (50, 20));
+        assert_eq!(cropped.get_pixel(25, 10).0, [1, 1, 1, 255]);
+    }
+
+    #[test]
+    fn same_scale_monitors_keep_their_contiguous_layout() {
+        let mut shots = vec![
+            shot((0.0, 0.0), (1280.0, 720.0), solid(2560, 1440, [1, 1, 1, 255])),
+            shot((1280.0, 0.0), (1280.0, 720.0), solid(2560, 1440, [2, 2, 2, 255])),
+        ];
+        separate_mixed_scale_origins(&mut shots);
+        assert_eq!(shots[1].origin_x, 1280.0);
     }
 
     #[test]

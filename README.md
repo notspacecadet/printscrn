@@ -84,7 +84,7 @@ The first launch asks for **Screen Recording**. Allow it. If the frozen image is
 
 ## FAQ
 
-**If the frozen screen gets stuck.** Press **Esc**, right-click, or wait up to 60 seconds. The overlay closes on its own. **Ctrl+Alt+Q** quits Stillshot. **Ctrl+Alt+Del** still opens the Windows security screen, and Task Manager can cover the overlay. Quit is also in the tray menu or the Mac menu bar. A log is written to `%LOCALAPPDATA%\Stillshot\stillshot.log` on Windows. Stillshot does not capture when it launches, and a second launch does not start another copy.
+**If the frozen screen gets stuck.** Press **Esc**, right-click, or wait up to 60 seconds. On Windows, the Windows key or Alt+Tab also closes it. **Ctrl+Alt+Q** quits Stillshot. **Ctrl+Alt+Del** still opens the Windows security screen. Quit is also in the tray menu or the Mac menu bar. A log is written to `%LOCALAPPDATA%\Stillshot\stillshot.log` on Windows. Stillshot does not capture when it launches, and a second launch does not start another copy.
 
 **Paste works in a browser but not in Paint, or the other way around.** The copy includes the formats those apps ask for: PNG for browsers and chat apps, and the classic bitmap formats for Paint and other Windows apps. On Mac the pasteboard gets both PNG and TIFF.
 

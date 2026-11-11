@@ -21,7 +21,7 @@ pub fn paint(app: &mut App, ctx: &egui::Context, monitor_index: usize) {
     draw_hints(app, ctx, monitor_index, screen);
     draw_toolbar(app, ctx, monitor_index, screen);
     draw_text_editor(app, ctx, monitor_index);
-    app.handle_keys(ctx);
+    app.handle_keys(ctx, monitor_index);
     if let Some(local) = ctx.input(|i| i.pointer.hover_pos().or_else(|| i.pointer.interact_pos())) {
         app.pointer(ctx, monitor_index, local);
     } else if ctx.input(|i| i.pointer.primary_released()) {
@@ -431,12 +431,16 @@ fn draw_text_editor(app: &mut App, ctx: &egui::Context, monitor_index: usize) {
                 .corner_radius(CornerRadius::same(6))
                 .inner_margin(egui::Margin::symmetric(6, 4))
                 .show(ui, |ui| {
-                    ui.add(
+                    let edit = ui.add(
                         egui::TextEdit::singleline(&mut body)
                             .hint_text("Label")
                             .desired_width(180.0)
                             .font(egui::TextStyle::Heading),
                     );
+                    // Type straight away; no extra click into the field.
+                    if !edit.has_focus() && !edit.lost_focus() {
+                        edit.request_focus();
+                    }
                 });
         });
     if let Some(slot) = app.text_body_mut() {

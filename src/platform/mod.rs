@@ -1,4 +1,4 @@
-//! Login item, single-instance lock, and platform permission helpers.
+//! Login item, single-instance lock, keyboard hook, and platform permission helpers.
 
 use anyhow::{Result, anyhow};
 use std::path::Path;
@@ -150,6 +150,23 @@ fn unix_lock() -> bool {
     true
 }
 
+/// Start the Windows keyboard hook thread. It carries Print Screen and the
+/// keys that close the overlay. Does nothing on other platforms.
+pub fn start_keyboard_hook() {
+    #[cfg(target_os = "windows")]
+    windows::start_keyboard_hook();
+}
+
+/// Give the platform layer a way to wake the UI thread from another thread.
+pub fn set_waker(waker: Box<dyn Fn() + Send + Sync>) {
+    #[cfg(target_os = "windows")]
+    windows::set_waker(waker);
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = waker;
+    }
+}
+
 pub fn install_print_screen_hook(ctrl: bool, alt: bool, shift: bool, meta: bool) {
     #[cfg(target_os = "windows")]
     windows::install_print_screen_hook(ctrl, alt, shift, meta);
@@ -184,7 +201,9 @@ pub fn set_overlay_active(active: bool) {
     }
 }
 
-/// Esc or right-click, edge-triggered. False on platforms without a poll.
+/// A request to close the overlay that did not come through the overlay
+/// window: the keyboard hook, or a key-state poll. False on platforms
+/// without either.
 pub fn dismiss_pressed() -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -208,9 +227,29 @@ pub fn panic_quit_pressed() -> bool {
     }
 }
 
-pub fn raise_app_windows() {
+/// Monitor rectangles `(x, y, width, height)` in physical pixels, in the order
+/// the windowing layer numbers monitors. Empty when the platform cannot say.
+pub fn monitor_rects() -> Vec<(i32, i32, i32, i32)> {
     #[cfg(target_os = "windows")]
-    windows::raise_app_windows();
+    {
+        windows::monitor_rects()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Vec::new()
+    }
+}
+
+/// Cursor position in the same coordinates as [`monitor_rects`].
+pub fn cursor_position() -> Option<(i32, i32)> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::cursor_position()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
 }
 
 pub fn emergency_close_windows() {

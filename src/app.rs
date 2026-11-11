@@ -1,5 +1,16 @@
 //! Stillshot's windowed UI: a tray-resident settings window plus one
 //! borderless overlay per monitor when a freeze is active.
+//!
+//! How a frame runs (eframe 0.37):
+//!
+//! * [`eframe::App::logic`] runs every tick, whether or not the settings
+//!   window is visible. Hotkeys, the tray menu, timeouts and window visibility
+//!   live there, so the app keeps working from the tray.
+//! * [`eframe::App::ui`] draws the settings window and, during a freeze, the
+//!   overlays. Each overlay is shown with exactly ONE
+//!   `show_viewport_immediate` call per frame. Every such call takes that
+//!   window's pending input, clears it, paints and presents. A second call in
+//!   the same frame presents a second picture and gets no input at all.
 
 use crate::annotate::{Annotation, Color, Document, Pt, SWATCHES, Shape, Tool, simplify_stroke};
 use crate::capture::{self, Desktop};
@@ -16,7 +27,7 @@ use crate::paint;
 use crate::platform;
 use crate::save;
 use anyhow::Result;
-use eframe::egui::{self, Color32, Key, Pos2, Rect, TextureHandle, Vec2};
+use eframe::egui::{self, Color32, Key, Pos2, Rect, TextureHandle, Vec2, ViewportId};
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use image::RgbaImage;
@@ -31,6 +42,18 @@ static PANIC_QUIT: AtomicBool = AtomicBool::new(false);
 static PANIC_HOTKEY_ID: AtomicU32 = AtomicU32::new(u32::MAX);
 static MENU_EVENTS: Mutex<Vec<MenuEvent>> = Mutex::new(Vec::new());
 static UI_CTX: OnceLock<egui::Context> = OnceLock::new();
+
+/// How often the logic ticks while a freeze is up. This is also the overlay
+/// frame cap: immediate viewports are painted from the root frame, and vsync
+/// is off on Windows.
+const SESSION_TICK: Duration = Duration::from_millis(16);
+/// How often the logic ticks while idle in the tray.
+const IDLE_TICK: Duration = Duration::from_millis(100);
+/// Ask for keyboard focus at most this many times per freeze.
+const FOCUS_ATTEMPTS: u8 = 3;
+const FOCUS_RETRY: Duration = Duration::from_millis(250);
+/// Once the overlay has had focus and lost it for this long, it closes.
+const FOCUS_LOSS_GRACE: Duration = Duration::from_millis(400);
 
 pub fn request_capture() {
     CAPTURE_REQUESTED.store(true, Ordering::SeqCst);
@@ -62,7 +85,8 @@ pub struct App {
     registered: Option<HotKey>,
     panic_hotkey: Option<HotKey>,
     gate: CaptureGate,
-    foreground_requested: bool,
+    /// What we last told the settings window to be. Commands go out on change only.
+    root_visible: Option<bool>,
     tray: Option<TrayIcon>,
     tray_capture: MenuId,
     tray_settings: MenuId,
@@ -70,11 +94,24 @@ pub struct App {
     session: Option<Session>,
     textures: Textures,
     hover_monitor: usize,
+    /// `slot_monitor` is known to be right.
     matched: bool,
-    outers: Vec<Option<Rect>>,
+    /// Overlay window `slot` (the windowing layer's monitor index) shows
+    /// `desktop.monitors[slot_monitor[slot]]`.
     slot_monitor: Vec<usize>,
+    /// The overlay on the monitor under the cursor. It gets keyboard focus.
+    focus_slot: usize,
+    /// When the overlays were last painted in this freeze.
+    last_overlay_frame: Option<Instant>,
+    /// A "Save as" waiting for the overlay windows to go away.
+    pending_save: Option<PendingSave>,
     key_stamp: u64,
     stamp: u64,
+}
+
+struct PendingSave {
+    image: RgbaImage,
+    waited_frames: u8,
 }
 
 struct Textures {
@@ -101,6 +138,11 @@ pub(crate) struct Session {
     pub render_gen: u64,
     pub opened: Instant,
     pub logged_paint: bool,
+    /// An overlay window has had keyboard focus at some point.
+    pub had_focus: bool,
+    pub unfocused_since: Option<Instant>,
+    pub focus_attempts: u8,
+    pub next_focus_at: Instant,
 }
 
 pub(crate) struct Selection {
@@ -150,7 +192,7 @@ impl App {
             registered: None,
             panic_hotkey: None,
             gate: CaptureGate::new(),
-            foreground_requested: false,
+            root_visible: Some(launch.show_settings),
             tray,
             tray_capture,
             tray_settings,
@@ -163,11 +205,17 @@ impl App {
             },
             hover_monitor: 0,
             matched: false,
-            outers: Vec::new(),
             slot_monitor: Vec::new(),
+            focus_slot: 0,
+            last_overlay_frame: None,
+            pending_save: None,
             key_stamp: 0,
             stamp: 0,
         };
+        // The keyboard hook runs on its own thread and wakes us through this.
+        let wake_ctx = cc.egui_ctx.clone();
+        platform::set_waker(Box::new(move || wake_ctx.request_repaint()));
+        platform::start_keyboard_hook();
         if let Err(err) = platform::set_launch_at_login(app.config.launch_at_login) {
             log(format!("launch at login: {err}"));
         }
@@ -255,10 +303,16 @@ impl App {
                     crop: None,
                     crop_gen: 0,
                 };
-                self.outers = vec![None; n];
-                self.slot_monitor = (0..n).collect();
-                self.matched = n <= 1;
-                self.foreground_requested = false;
+                let (slot_monitor, matched) = initial_slot_map(&desktop);
+                self.focus_slot = cursor_slot(&desktop, &slot_monitor);
+                self.hover_monitor = slot_monitor.get(self.focus_slot).copied().unwrap_or(0);
+                self.slot_monitor = slot_monitor;
+                self.matched = matched;
+                self.last_overlay_frame = None;
+                log(format!(
+                    "overlay slots -> monitors {:?} (matched={}), focus slot {}",
+                    self.slot_monitor, self.matched, self.focus_slot
+                ));
                 self.gate.on_opened();
                 self.session = Some(Session {
                     desktop,
@@ -278,6 +332,10 @@ impl App {
                     render_gen: 0,
                     opened: started,
                     logged_paint: false,
+                    had_focus: false,
+                    unfocused_since: None,
+                    focus_attempts: 0,
+                    next_focus_at: Instant::now(),
                 });
             }
             Err(err) => {
@@ -292,6 +350,7 @@ impl App {
     }
 
     fn close_session(&mut self) {
+        let overlays = self.slot_monitor.len();
         let was_open = self.session.take().is_some();
         self.textures = Textures {
             monitors: Vec::new(),
@@ -299,11 +358,22 @@ impl App {
             crop_gen: 0,
         };
         self.matched = false;
-        self.foreground_requested = false;
+        self.last_overlay_frame = None;
         if was_open {
             self.gate.on_closed(Instant::now());
             platform::set_overlay_active(false);
             platform::end_overlay_watch();
+            if let Some(ctx) = UI_CTX.get() {
+                // Take the windows off screen now. They are destroyed on the
+                // next frame, when `ui` no longer shows them.
+                for slot in 0..overlays {
+                    ctx.send_viewport_cmd_to(
+                        overlay_id(slot),
+                        egui::ViewportCommand::Visible(false),
+                    );
+                }
+                ctx.request_repaint_of(ViewportId::ROOT);
+            }
             log("overlay closed");
         }
     }
@@ -318,36 +388,47 @@ impl eframe::App for App {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
+    /// Runs every tick, with the settings window visible or not.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let _keep_tray_alive = &self.tray;
         self.stamp = self.stamp.wrapping_add(1);
         self.pump_events();
         if self.quit {
             self.close_session();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::Close);
             return;
         }
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.quit {
-                return;
-            }
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            // The close button hides the settings window; the app stays in the tray.
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::CancelClose);
             self.show_settings = false;
         }
-        if self.show_settings && self.session.is_none() {
+        self.run_pending_save(ctx);
+        self.sync_settings_window(ctx);
+        if self.session.is_some() {
+            // Immediate overlays are drawn inside the root frame. A hidden
+            // settings window does not run `ui` unless asked, and then the
+            // freeze never sees the mouse. Keep asking for the whole capture.
+            ctx.send_viewport_cmd_to(
+                ViewportId::ROOT,
+                egui::ViewportCommand::RequestPaintWhileHidden,
+            );
+            ctx.request_repaint_after(SESSION_TICK);
+        } else {
+            ctx.request_repaint_after(IDLE_TICK);
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.quit {
+            return;
+        }
+        let ctx = ui.ctx().clone();
+        if self.show_settings {
             self.settings_ui(ui);
         }
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(
-            self.show_settings && self.session.is_none(),
-        ));
         if self.session.is_some() {
             self.show_overlays(&ctx);
-        }
-        let interval = if self.session.is_some() { 16 } else { 80 };
-        ctx.request_repaint_after(Duration::from_millis(interval));
-        if self.quit {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
 }
@@ -396,133 +477,184 @@ impl App {
         }
     }
 
+    /// Show or hide the settings window, but only when that changes.
+    ///
+    /// The settings window is left alone during a freeze. Hiding or showing a
+    /// window moves activation around, and the overlay needs the keyboard.
+    fn sync_settings_window(&mut self, ctx: &egui::Context) {
+        let want = self.show_settings;
+        if self.root_visible == Some(want) || self.session.is_some() {
+            return;
+        }
+        ctx.send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::Visible(want));
+        if want {
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, egui::ViewportCommand::Focus);
+        }
+        self.root_visible = Some(want);
+    }
+
     fn show_overlays(&mut self, ctx: &egui::Context) {
-        let n = self
-            .session
-            .as_ref()
-            .map(|s| s.desktop.monitors.len())
-            .unwrap_or(0);
+        let n = self.slot_monitor.len();
         if n == 0 {
             return;
         }
+        // Do not sleep here. This runs on the UI thread, and a sleep stalls
+        // mouse input for the whole freeze. `logic` already caps the tick.
+        let first_frame = self.last_overlay_frame.is_none();
+        self.last_overlay_frame = Some(Instant::now());
+        self.match_overlay_windows(ctx);
+
+        let mut any_focused = false;
         for slot in 0..n {
-            let builder = self.overlay_builder(slot);
-            ctx.show_viewport_immediate(overlay_id(slot), builder, |ui, _| {
-                self.record_outer(ui.ctx(), slot);
-            });
-        }
-        self.lock_match();
-        for slot in 0..n {
-            let builder = self.overlay_builder(slot);
-            let id = overlay_id(slot);
-            ctx.show_viewport_immediate(id, builder, |ui, _| {
-                self.paint_overlay(ui.ctx(), slot);
-            });
-            let young = self
-                .session
-                .as_ref()
-                .is_some_and(|s| s.opened.elapsed() < Duration::from_millis(500));
-            if young {
-                ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
+            if self.session.is_none() {
+                // An earlier overlay closed the freeze during this frame.
+                break;
             }
+            let id = overlay_id(slot);
+            if first_frame {
+                // Undo the hide from the previous freeze if the window survived it.
+                ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Visible(true));
+            }
+            let builder = self.overlay_builder(slot);
+            // Exactly one immediate pass per overlay per frame. See the module docs.
+            ctx.show_viewport_immediate(id, builder, |ui, _class| {
+                let ctx = ui.ctx().clone();
+                if ctx.input(|i| i.viewport().focused) == Some(true) {
+                    any_focused = true;
+                }
+                self.paint_overlay(&ctx, slot);
+            });
         }
-        if self.session.is_some() && !self.foreground_requested {
-            self.foreground_requested = true;
-            platform::raise_app_windows();
-        }
+        self.update_focus(ctx, any_focused);
     }
 
     fn overlay_builder(&self, slot: usize) -> egui::ViewportBuilder {
-        // `with_monitor` puts a borderless fullscreen window on that display.
-        // Setting an explicit size as well fights the fullscreen state and the
-        // window drifts by a few pixels on later frames.
-        // Normal z-order, not always-on-top: Task Manager must be able to cover this.
+        // `with_monitor` makes a borderless fullscreen window on that display,
+        // so the windowing layer owns the rectangle and the DPI. No explicit
+        // position or size: those fight the fullscreen state.
+        //
+        // Topmost on Windows, so the frozen picture also covers the taskbar and
+        // the overlay cannot open underneath another window. What keeps that
+        // safe: Esc, Win and Alt+Tab close it from the keyboard hook without
+        // needing focus, losing focus closes it, right-click closes it, and the
+        // 60 second timeout and watchdog still apply.
+        let level = if cfg!(target_os = "windows") {
+            egui::WindowLevel::AlwaysOnTop
+        } else {
+            egui::WindowLevel::Normal
+        };
+        // This must return the same builder every frame of a freeze. A changed
+        // builder makes egui patch or recreate the window.
         egui::ViewportBuilder::default()
             .with_title("Stillshot")
             .with_decorations(false)
             .with_resizable(false)
-            .with_window_level(egui::WindowLevel::Normal)
+            .with_window_level(level)
             .with_taskbar(false)
             .with_has_shadow(false)
             .with_visible(true)
-            .with_active(slot == 0)
+            .with_active(slot == self.focus_slot)
             .with_monitor(slot)
             .with_clamp_size_to_monitor_size(false)
     }
 
-    fn record_outer(&mut self, ctx: &egui::Context, slot: usize) {
-        let rect = ctx.input(|i| i.viewport().outer_rect);
-        if let Some(rect) = rect {
-            if rect.width() > 32.0 && rect.height() > 32.0 && slot < self.outers.len() {
-                self.outers[slot] = Some(rect);
-            }
-        }
-    }
-
-    fn lock_match(&mut self) {
+    /// Fallback for platforms where the slot order is not known up front:
+    /// pair overlay windows with captures by position, using the window
+    /// rectangles the previous frame reported. Until that succeeds, slot `i`
+    /// shows capture `i`.
+    fn match_overlay_windows(&mut self, ctx: &egui::Context) {
         if self.matched {
             return;
         }
-        let n = self.outers.len();
-        if n == 0 || self.outers.iter().any(|rect| rect.is_none()) {
+        let n = self.slot_monitor.len();
+        let rects: Vec<Option<Rect>> = ctx.input(|i| {
+            (0..n)
+                .map(|slot| {
+                    i.raw
+                        .viewports
+                        .get(&overlay_id(slot))
+                        .and_then(|info| info.outer_rect)
+                        .filter(|rect| rect.width() > 32.0 && rect.height() > 32.0)
+                })
+                .collect()
+        });
+        if n == 0 || rects.iter().any(|rect| rect.is_none()) {
             return;
         }
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by(|a, b| {
-            let ra = self.outers[*a].unwrap();
-            let rb = self.outers[*b].unwrap();
+            let ra = rects[*a].unwrap();
+            let rb = rects[*b].unwrap();
             ra.min
                 .y
                 .total_cmp(&rb.min.y)
                 .then(ra.min.x.total_cmp(&rb.min.x))
         });
-        // Captures were sorted the same way (top-to-bottom, left-to-right).
+        // Captures are sorted the same way (top-to-bottom, left-to-right).
         for (image, slot) in order.into_iter().enumerate() {
             self.slot_monitor[slot] = image;
         }
         self.matched = true;
-        log(format!("matched {} overlay windows to monitors", n));
+        log(format!(
+            "matched {n} overlay windows to monitors by position: {:?}",
+            self.slot_monitor
+        ));
+    }
+
+    /// Give one overlay the keyboard, once, and close the freeze when the
+    /// overlay has had the keyboard and lost it.
+    fn update_focus(&mut self, ctx: &egui::Context, any_focused: bool) {
+        let focus_id = overlay_id(self.focus_slot);
+        let now = Instant::now();
+        let mut lost = false;
+        if let Some(session) = &mut self.session {
+            if any_focused {
+                if !session.had_focus {
+                    log(format!(
+                        "overlay has keyboard focus {} ms after the shortcut",
+                        session.opened.elapsed().as_millis()
+                    ));
+                }
+                session.had_focus = true;
+                session.unfocused_since = None;
+            } else if session.had_focus {
+                // Something else took the foreground. A topmost overlay must
+                // not sit on top of it.
+                let since = *session.unfocused_since.get_or_insert(now);
+                lost = now.duration_since(since) >= FOCUS_LOSS_GRACE;
+            } else if session.focus_attempts < FOCUS_ATTEMPTS && now >= session.next_focus_at {
+                // One window, a few spaced attempts. Asking every overlay on
+                // every frame makes them steal the foreground from each other.
+                session.focus_attempts += 1;
+                session.next_focus_at = now + FOCUS_RETRY;
+                ctx.send_viewport_cmd_to(focus_id, egui::ViewportCommand::Focus);
+            }
+        }
+        if lost {
+            log("overlay lost keyboard focus; closing it");
+            self.close_session();
+        }
     }
 
     fn paint_overlay(&mut self, ctx: &egui::Context, slot: usize) {
         let monitor_index = self.slot_monitor.get(slot).copied().unwrap_or(slot);
-        self.adopt_window_rect(ctx, monitor_index);
         self.ensure_monitor_texture(ctx, monitor_index);
         self.ensure_crop_texture(ctx);
-        if let Some(session) = &self.session {
+        if let Some(session) = &mut self.session {
             if !session.logged_paint {
+                session.logged_paint = true;
                 let view = ctx.viewport_rect();
                 log(format!(
-                    "first overlay paint {} ms after the shortcut woke us (capture was {} ms), viewport {:.0}x{:.0}",
+                    "first overlay paint {} ms after the shortcut woke us (capture was {} ms), viewport {:.0}x{:.0} points at {:.2} px/pt",
                     session.opened.elapsed().as_millis(),
                     session.desktop.capture_ms,
                     view.width(),
-                    view.height()
+                    view.height(),
+                    ctx.pixels_per_point()
                 ));
             }
         }
-        if let Some(session) = &mut self.session {
-            session.logged_paint = true;
-        }
         crate::overlay::paint(self, ctx, monitor_index);
-    }
-
-    fn adopt_window_rect(&mut self, ctx: &egui::Context, monitor_index: usize) {
-        let Some(rect) = ctx.input(|i| i.viewport().outer_rect) else {
-            return;
-        };
-        if rect.width() < 32.0 || rect.height() < 32.0 {
-            return;
-        }
-        if let Some(session) = &mut self.session {
-            if let Some(monitor) = session.desktop.monitors.get_mut(monitor_index) {
-                // Keep the captured point size as the window size we ask for.
-                // Only the origin is taken from the live window, so a window
-                // manager inset cannot shrink the frozen frame on the next frame.
-                monitor.origin_x = rect.min.x;
-                monitor.origin_y = rect.min.y;
-            }
-        }
     }
 
     fn ensure_monitor_texture(&mut self, ctx: &egui::Context, monitor_index: usize) {
@@ -581,6 +713,54 @@ impl App {
 
 fn overlay_id(slot: usize) -> egui::ViewportId {
     egui::ViewportId::from_hash_of(("stillshot-overlay", slot))
+}
+
+/// Which capture each overlay slot shows, and whether that is certain.
+///
+/// Slot `i` is the windowing layer's monitor `i`. On Windows that order is
+/// `EnumDisplayMonitors`, which [`platform::monitor_rects`] repeats, so the
+/// pairing is known before the first frame and no overlay ever starts out
+/// showing another monitor's picture.
+fn initial_slot_map(desktop: &Desktop) -> (Vec<usize>, bool) {
+    let n = desktop.monitors.len();
+    let identity: Vec<usize> = (0..n).collect();
+    if n <= 1 {
+        return (identity, true);
+    }
+    let rects = platform::monitor_rects();
+    if rects.len() != n {
+        return (identity, false);
+    }
+    let mut map = Vec::with_capacity(n);
+    for (x, y, _, _) in rects {
+        let found = desktop
+            .monitors
+            .iter()
+            .position(|m| m.raw_x == x && m.raw_y == y);
+        match found {
+            Some(image) if !map.contains(&image) => map.push(image),
+            _ => return (identity, false),
+        }
+    }
+    (map, true)
+}
+
+/// The overlay slot on the monitor under the mouse cursor, or 0.
+fn cursor_slot(desktop: &Desktop, slot_monitor: &[usize]) -> usize {
+    let Some((cx, cy)) = platform::cursor_position() else {
+        return 0;
+    };
+    desktop
+        .monitors
+        .iter()
+        .position(|m| {
+            cx >= m.raw_x
+                && cy >= m.raw_y
+                && cx < m.raw_x + m.raw_w as i32
+                && cy < m.raw_y + m.raw_h as i32
+        })
+        .and_then(|image| slot_monitor.iter().position(|m| *m == image))
+        .unwrap_or(0)
 }
 
 fn install_fonts(ctx: &egui::Context) {
@@ -692,12 +872,14 @@ impl App {
     pub(crate) fn crop_texture(&self) -> Option<&TextureHandle> {
         self.textures.crop.as_ref()
     }
-    pub(crate) fn handle_keys(&mut self, ctx: &egui::Context) {
+    pub(crate) fn handle_keys(&mut self, ctx: &egui::Context, monitor_index: usize) {
         if self.key_stamp == self.stamp {
             return;
         }
         let escape = ctx.input(|i| i.key_pressed(Key::Escape));
-        let right = ctx.input(|i| i.pointer.secondary_pressed());
+        // Release, not press: the whole click stays with the overlay, so the
+        // button-up cannot open a context menu in the app underneath.
+        let right = ctx.input(|i| i.pointer.secondary_released());
         if escape || right {
             self.key_stamp = self.stamp;
             log(if right {
@@ -744,17 +926,22 @@ impl App {
             return;
         }
         if command_c || enter {
-            self.confirm_and_close();
+            self.confirm_and_close(monitor_index);
             return;
         }
+        // The second press of a double-click has already started a (tiny)
+        // drag by the time its release reports the double-click.
+        let no_real_drag = |s: &Session| {
+            s.drag
+                .is_none_or(|(a, b)| (a.x - b.x).abs() < 3.0 && (a.y - b.y).abs() < 3.0)
+        };
         if double
             && self
                 .session
                 .as_ref()
-                .is_some_and(|s| s.selection.is_none() && s.drag.is_none())
+                .is_some_and(|s| s.selection.is_none() && no_real_drag(s))
         {
-            let monitor = self.hover_monitor;
-            self.copy_whole_monitor(monitor);
+            self.copy_whole_monitor(monitor_index);
             self.close_session();
             return;
         }
@@ -1132,7 +1319,7 @@ impl App {
         self.toast("Copied");
     }
 
-    fn confirm_and_close(&mut self) {
+    fn confirm_and_close(&mut self, monitor: usize) {
         if self.session.as_ref().is_some_and(|s| s.selection.is_some()) {
             if let Some(image) = self
                 .session
@@ -1143,7 +1330,6 @@ impl App {
             }
             self.close_session();
         } else {
-            let monitor = self.hover_monitor;
             self.copy_whole_monitor(monitor);
             self.close_session();
         }
@@ -1220,6 +1406,9 @@ impl App {
         }
     }
 
+    /// "Save as" from the overlay. The overlay is topmost and fullscreen, so a
+    /// file dialog opened now would sit underneath it. Close the freeze first;
+    /// [`Self::run_pending_save`] opens the dialog once the windows are gone.
     fn save_as(&mut self) {
         let Some(image) = self.session.as_ref().and_then(|s| {
             s.selection
@@ -1227,6 +1416,30 @@ impl App {
                 .map(|sel| sel.rendered.clone())
                 .or_else(|| s.desktop.monitors.first().map(|m| m.image.clone()))
         }) else {
+            return;
+        };
+        log("save as: closing the overlay before the file dialog opens");
+        self.pending_save = Some(PendingSave {
+            image,
+            waited_frames: 0,
+        });
+        self.close_session();
+    }
+
+    fn run_pending_save(&mut self, ctx: &egui::Context) {
+        if self.session.is_some() {
+            return;
+        }
+        let Some(pending) = self.pending_save.as_mut() else {
+            return;
+        };
+        if pending.waited_frames < 1 {
+            // Give the overlay windows one frame to be destroyed.
+            pending.waited_frames += 1;
+            ctx.request_repaint();
+            return;
+        }
+        let Some(pending) = self.pending_save.take() else {
             return;
         };
         let Some(path) = rfd::FileDialog::new()
@@ -1237,17 +1450,17 @@ impl App {
         else {
             return;
         };
-        match clipboard::encode_png(&image) {
-            Ok(bytes) => {
-                if let Err(err) = std::fs::write(&path, bytes) {
-                    self.status = format!("Save failed: {err}");
-                } else if let Some(session) = &mut self.session {
-                    session.saved_path = Some(path);
-                    session.toast = "Saved".into();
-                    session.toast_until = Some(Instant::now() + Duration::from_millis(1200));
-                }
+        let written = clipboard::encode_png(&pending.image)
+            .and_then(|bytes| std::fs::write(&path, bytes).map_err(anyhow::Error::from));
+        match written {
+            Ok(()) => {
+                log(format!("saved {}", path.display()));
+                self.status = format!("Saved {}", path.display());
             }
-            Err(err) => self.status = format!("Save failed: {err}"),
+            Err(err) => {
+                log(format!("save as failed: {err}"));
+                self.status = format!("Save failed: {err}");
+            }
         }
     }
 
@@ -1322,7 +1535,8 @@ impl App {
     }
 
     pub(crate) fn request_copy(&mut self) {
-        self.confirm_and_close();
+        let monitor = self.hover_monitor;
+        self.confirm_and_close(monitor);
     }
 
     pub(crate) fn request_close(&mut self) {

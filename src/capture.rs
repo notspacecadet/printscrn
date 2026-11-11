@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use image::RgbaImage;
 use std::time::Instant;
 
-use crate::desktop::{MonitorShot, initial_point_rect};
+use crate::desktop::{MonitorShot, initial_point_rect, separate_mixed_scale_origins};
 use crate::log::log;
 
 #[derive(Clone, Debug)]
@@ -76,6 +76,7 @@ pub fn capture_desktop() -> Result<Desktop> {
             .then(a.raw_x.cmp(&b.raw_x))
             .then(a.name.cmp(&b.name))
     });
+    separate_mixed_scale_origins(&mut shots);
     let capture_ms = started.elapsed().as_millis();
     log(format!(
         "froze {} monitor(s) in {capture_ms} ms",
