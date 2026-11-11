@@ -1,136 +1,102 @@
 # Stillshot
 
-Stillshot replaces Snipping Tool, Lightshot, and the macOS screenshot overlay. Press the shortcut and the screen freezes at that instant, including menus, tooltips, and the current video frame. Drag a rectangle. When you let go, the PNG is already on the clipboard.
+Press the shortcut and Stillshot freezes the screen at that instant, including menus, tooltips, and the current video frame. Drag a rectangle. When you let go, the PNG is already on the clipboard.
 
-## Install
+## Download
 
-### Windows 10 or 11
+Windows 10 or 11, and macOS 12 or later. These links always point at the latest release.
 
-1. Download `Stillshot-Setup.exe` from the latest build (GitHub Actions artifact `stillshot-windows`, or the file a release attaches).
-2. Run it. It installs for your user only, under `%LOCALAPPDATA%\Stillshot`, and does not ask for an administrator password.
-3. Windows SmartScreen will warn that the app is unsigned. Choose **More info**, then **Run anyway**.
-4. Stillshot appears in the system tray. It also starts when you sign in.
-
-If Print Screen still opens Snipping Tool, turn off **Settings → Accessibility → Keyboard → Use the Print screen key to open screen snipping**. Stillshot also installs a low-level hook so it can take Print Screen itself. If that hook cannot be installed, pick another shortcut in Settings.
-
-A portable `stillshot.exe` is produced next to the installer. You can run that without installing. Close it from the tray menu.
-
-### macOS 12 or later
-
-1. Download `Stillshot.dmg` (GitHub Actions artifact `stillshot-macos`).
-2. Open the disk image and drag **Stillshot** to **Applications**.
-3. The app is unsigned. The first time you open it, macOS will say it cannot be verified.
-   - Control-click the app in Finder, choose **Open**, then **Open** again.
-   - Or, after one blocked launch: **System Settings → Privacy & Security**, scroll to the Stillshot message, and click **Open Anyway**.
-   - Terminal alternative: `xattr -dr com.apple.quarantine /Applications/Stillshot.app`
-4. Stillshot sits in the menu bar (no Dock icon). The first launch asks for **Screen Recording**.
-   - Click **Grant access** and allow Stillshot in the system prompt.
-   - If the frozen image is black or capture fails, quit Stillshot and open it again. macOS only applies that permission to new processes.
-   - You can also open **System Settings → Privacy & Security → Screen Recording** yourself. There is a button for that in Stillshot’s settings.
-
-The disk image contains a universal binary (Apple silicon and Intel).
-
-## Use it
-
-| Action | Result |
+|  |  |
 | --- | --- |
-| Shortcut | Freeze every display as it is right now |
-| Drag | Select a region. Releasing the mouse copies the PNG immediately |
-| Enter | Copy the selection, including annotations, and close |
-| Double-click | Copy the whole display under the pointer |
-| Esc | Cancel the current mark, or close the overlay |
-| Ctrl/Cmd+C | Copy the selection (with annotations) and close |
-| Ctrl/Cmd+Z | Undo |
-| Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y | Redo |
-| Ctrl/Cmd+S | Save a copy somewhere else |
+| Windows installer | [Stillshot-Setup.exe](https://github.com/notspacecadet/printscrn/releases/latest/download/Stillshot-Setup.exe) |
+| Windows portable app | [stillshot.exe](https://github.com/notspacecadet/printscrn/releases/latest/download/stillshot.exe) |
+| macOS disk image | [Stillshot.dmg](https://github.com/notspacecadet/printscrn/releases/latest/download/Stillshot.dmg) |
 
-After the region is copied, a toolbar appears on the selection. Drawing does not get in the way of the first copy: if you only drag and release, you are done. Each finished mark (pen, shape, text, blur) updates the clipboard and, if saving is on, the same file.
+All releases are listed on the [releases page](https://github.com/notspacecadet/printscrn/releases/latest).
 
-Toolbar tools: pen, highlighter, line, arrow, rectangle, ellipse, text, blur, pixelate, eyedropper, colors, stroke width, undo, redo, Copy, Save, Close. Hold Shift while drawing a line, arrow, rectangle, or ellipse to constrain it.
+**Windows installer.** Run `Stillshot-Setup.exe`. It installs for your user only, under `%LOCALAPPDATA%\Stillshot`, and does not ask for an administrator password. Stillshot appears in the system tray and starts when you sign in.
 
-Default shortcuts:
+**Windows portable.** Run `stillshot.exe` without installing. Close it from the tray menu.
 
-- Windows: **Print Screen**
-- Mac: **⌘⇧2** (Command-Shift-2, which is not used by the system screenshot keys)
+**macOS.** Open `Stillshot.dmg` and drag Stillshot to Applications. It sits in the menu bar and does not show a Dock icon. The disk image is a universal app (Apple silicon and Intel).
 
-Change the shortcut from the tray menu → **Settings…**.
+Read [First launch](#first-launch) before the first open. The builds are unsigned.
 
-Copies are also written to `~/Pictures/Screenshots` (on Windows, your Pictures folder, then `Screenshots`). Turn that off in Settings. Files are named like `Screenshot 2026-11-10 at 23.45.01.png`.
+## How to use
 
-## What gets put on the clipboard
+1. Press the shortcut. Windows uses **Print Screen**. Mac uses **Command-Shift-2**.
+2. The screen freezes as it is right now. Drag a rectangle.
+3. Releasing the mouse copies that region to the clipboard. Paste it into Slack, Chrome, Paint, Preview, or anywhere else that accepts an image.
+4. A toolbar appears on the selection if you want to mark it up. Each finished mark updates the clipboard. If you only drag and release, you are done.
+5. Press **Enter** or **Ctrl+C** / **Command-C** to copy the selection, including annotations, and close. **Esc** cancels the current mark, or closes the overlay. Double-click copies the whole display under the pointer.
 
-The bitmap is encoded for the programs you paste into (Slack, WhatsApp Web, Chrome, Claude, Gmail, Paint, Preview):
+Copies are also written to `~/Pictures/Screenshots` (on Windows, your Pictures folder, then `Screenshots`). Files are named like `Screenshot 2026-11-10 at 23.45.01.png`. Turn saving off in Settings.
 
-- **Windows:** a PNG clipboard format (`RegisterClipboardFormat("PNG")`), a classic `CF_DIB` (bottom-up 32-bit BGRA), and a `CF_DIBV5` with alpha masks. PNG is written first because browsers and Electron apps prefer it. Paint and older Win32 apps ask for `CF_DIB`.
-- **macOS:** `NSPasteboard` gets both `public.png` and `public.tiff`.
-- **Linux** (for development): `image/png` on the X11 clipboard. The app has to keep running, which it does, in the tray.
+Change the shortcut from the tray menu on Windows, or the menu bar on Mac: **Settings…**.
 
-## Why this stack
+Toolbar tools: pen, highlighter, line, arrow, rectangle, ellipse, text, blur, pixelate, eyedropper, colors, stroke width, undo, redo, Copy, Save, and Close. Hold Shift while drawing a line, arrow, rectangle, or ellipse to keep it straight or square.
 
-Stillshot is a native Rust app: [eframe]/[egui] for the overlay, [xcap] for capture, and a small amount of platform clipboard code.
+## Features
 
-A WebView (Tauri or Electron) is the wrong trade for this tool. The frozen frame is a full-monitor RGBA buffer, often tens of megabytes once you include a Retina display. Shipping that through a browser and decoding it as a PNG blows the time budget before the overlay is even visible. Here the pixels stay in process, the overlay window is a borderless fullscreen viewport per monitor, and the image is uploaded as a GPU texture. Capture itself uses DXGI on Windows and Core Graphics on macOS, which is what the system screenshot tools use.
+- Freezes every display at the moment you press the shortcut, so menus, tooltips, and video frames stay in the picture.
+- Copies a PNG as soon as you release the drag.
+- Annotate after that first copy. Drawing does not get in the way if you only wanted the snip.
+- A selection on one screen is cropped 1:1 from that display’s pixels, including Retina and other high-DPI screens.
+- Saves the same image under Pictures/Screenshots, and you can turn that off.
+- Lives in the system tray (Windows) or the menu bar (Mac) and starts when you sign in.
+- The Windows installer is per-user and does not need an administrator password.
 
-HiDPI: each display is captured at its physical pixel size. A selection that lives on one screen is cropped 1:1 out of that bitmap, so a Retina snip is not a blurry downsample. A selection that crosses two screens uses the scale of the screen that contains most of it.
+## Keyboard shortcuts
 
-## Build it yourself
+| Action | Shortcut |
+| --- | --- |
+| Freeze the screen | Print Screen on Windows, Command-Shift-2 on Mac |
+| Copy the selection, including annotations, and close | Enter, or Ctrl+C / Command-C |
+| Copy the whole display under the pointer | Double-click |
+| Cancel the current mark, or close | Esc |
+| Undo | Ctrl+Z / Command-Z |
+| Redo | Ctrl+Shift+Z / Command-Shift-Z, or Ctrl+Y / Command-Y |
+| Save a copy somewhere else | Ctrl+S / Command-S |
+| Constrain a line, arrow, rectangle, or ellipse | Hold Shift while drawing |
 
-You need a current stable Rust (1.95 or newer; eframe 0.37 sets that floor).
+## First launch
 
-### Windows
+The downloads are unsigned.
 
-From a PowerShell prompt in this folder, with [NSIS](https://nsis.sourceforge.io/) installed (`choco install nsis` if you use Chocolatey):
+**Windows SmartScreen.** When Windows says it protected your PC, choose **More info**, then **Run anyway**.
 
-```powershell
-.\scripts\build-windows.ps1
-```
+If Print Screen still opens Snipping Tool, turn off **Settings → Accessibility → Keyboard → Use the Print screen key to open screen snipping**. Stillshot also installs a hook so it can take Print Screen itself. If that hook cannot be installed, pick another shortcut in Settings.
 
-Outputs:
+**macOS.** The first open says the app cannot be verified. Right-click Stillshot in Finder, choose **Open**, then **Open** again. After a blocked launch you can also use **System Settings → Privacy & Security** and click **Open Anyway**.
 
-- `dist\stillshot.exe`
-- `dist\Stillshot-Setup.exe`
+The first launch asks for **Screen Recording**. Allow it. If the frozen image is black or capture fails, quit Stillshot and open it again. macOS applies that permission only to new processes. Stillshot’s settings include a button that opens **System Settings → Privacy & Security → Screen Recording**.
 
-### macOS
+## Uninstall
 
-From Terminal, with the Xcode command-line tools installed:
+**Windows.** Open the Start menu shortcut **Stillshot → Uninstall**, or run `%LOCALAPPDATA%\Stillshot\Uninstall.exe`. That removes the app, the Start menu shortcuts, and the sign-in startup entry. It does not ask for an administrator password. Screenshot files already saved under Pictures/Screenshots stay where they are.
 
-```bash
-bash scripts/build-macos.sh
-```
+**Portable Windows build.** Quit from the tray menu and delete `stillshot.exe`.
 
-That builds both `aarch64-apple-darwin` and `x86_64-apple-darwin`, merges them with `lipo`, and wraps the result in `dist/Stillshot.dmg`.
+**macOS.** Quit from the menu bar, then drag `Stillshot.app` from Applications to the Trash. To revoke Screen Recording, open **System Settings → Privacy & Security → Screen Recording** and remove Stillshot.
 
-### Tests
+## FAQ
 
-```bash
-cargo test --lib
-```
+**Paste works in a browser but not in Paint, or the other way around.** The copy includes the formats those apps ask for: PNG for browsers and chat apps, and the classic bitmap formats for Paint and other Windows apps. On Mac the pasteboard gets both PNG and TIFF.
 
-Those tests do not need a display. They cover region math (including a 2x HiDPI crop), PNG/TIFF/DIB byte layouts, the annotation rasterizer, undo/redo, shortcut parsing, and screenshot file names.
+**The shortcut does nothing.** Confirm Stillshot is running (tray icon or menu bar). Open Settings and check the shortcut. On Windows, turn off the Snipping Tool Print Screen setting described above.
 
-### GitHub Actions
+**The Mac capture is black.** Screen Recording was granted after Stillshot had already started. Quit and open it again.
 
-`.github/workflows/build.yml` runs the tests on Linux and uploads:
+**Where are the files?** `~/Pictures/Screenshots`, unless you turned saving off or chose another folder in Settings.
 
-- `stillshot-windows`: `stillshot.exe` and `Stillshot-Setup.exe`
-- `stillshot-macos`: `Stillshot.dmg`
+**Does it need an administrator password?** No. The Windows installer is per-user. On Mac you only drag the app to Applications.
 
-This environment is Linux, so it cannot cross-link the Windows or macOS GUI binaries. The workflow is the build that produces the installers.
+## Build from source
 
-## What was verified here
-
-On this Linux machine, with a 1920×1200 X11 display:
-
-- `cargo test --lib`: 31 tests passed.
-- `stillshot --self-check` captured the display and round-tripped the image through the clipboard. The center pixel matched. Capture was about 80 ms. Encoding the full 1920×1200 frame for the clipboard is much slower in a debug build than a normal region snip; release builds use the same fast PNG encoder.
-- `stillshot --capture` opened a borderless 1920×1200 overlay on the display. The frozen frame filled the screen, with the hint “Drag a region — it copies when you let go”. In a debug build the first paint landed about 190 ms after the capture started, and about 110 ms of that was showing the new window. A second capture, with the window already open, was about 150 ms in the same debug build. Release mode and a native DXGI or Core Graphics capture are both faster than X11 `GetImage` on this machine. The design target is under ~150 ms on Windows and macOS; that was not measured on those operating systems here.
-- Clipboard formats are tested as bytes everywhere: PNG and TIFF round-trip, and the DIB headers are the classic 40-byte `BITMAPINFOHEADER` plus a 124-byte `BITMAPV5HEADER` with alpha masks. The Windows `OpenClipboard` path and the macOS `NSPasteboard` path are compiled only on those OSes, so they were not executed here.
-- Dragging a region with `xdotool` did not reach the app. winit on X11 ignores pointer events marked emulated, which is how this VNC server reports synthetic clicks. A real mouse is what the overlay is built for. Keyboard shortcuts from `xdotool` had the same limitation.
-
-Not verified here: the Windows installer, the macOS disk image, Screen Recording permission UI on a Mac, Print Screen vs Snipping Tool on Windows 11, and pasting into Slack, Chrome, or Preview on those systems. The CI workflow is what builds those artifacts.
+You need Rust 1.95 or newer. Windows and macOS builds, tests, and the release workflow are documented in [docs/building.md](docs/building.md).
 
 ## License
 
-MIT OR Apache-2.0. See `LICENSE`.
+MIT OR Apache-2.0. See [LICENSE](LICENSE).
 
-The annotation font is [Inter](https://github.com/rsms/inter), licensed under the SIL Open Font License 1.1. See `assets/Inter-OFL.txt`.
+The annotation font is [Inter](https://github.com/rsms/inter), licensed under the SIL Open Font License 1.1. See [assets/Inter-OFL.txt](assets/Inter-OFL.txt).
