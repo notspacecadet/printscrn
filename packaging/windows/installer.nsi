@@ -26,7 +26,7 @@ Section "Install"
   CreateShortcut "$SMPROGRAMS\Stillshot\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Stillshot" "DisplayName" "Stillshot"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Stillshot" "UninstallString" "$INSTDIR\Uninstall.exe"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Stillshot" "DisplayVersion" "0.1.0"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Stillshot" "DisplayVersion" "0.1.1"
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Stillshot" "NoModify" 1
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Stillshot" "NoRepair" 1
 SectionEnd

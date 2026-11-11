@@ -1,21 +1,32 @@
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
+use std::sync::Mutex;
 use windows_sys::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, WPARAM,
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, WPARAM,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::CreateMutexW;
+use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
 use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_SNAPSHOT,
+    GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU, VK_RBUTTON, VK_RWIN, VK_SHIFT,
+    VK_SNAPSHOT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, HHOOK, KBDLLHOOKSTRUCT, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    CallNextHookEx, EnumWindows, GetWindowThreadProcessId, HHOOK, HWND_NOTOPMOST, KBDLLHOOKSTRUCT,
+    PostMessageW, PostQuitMessage, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow,
+    SetWindowPos, SetWindowsHookExW, UnhookWindowsHookEx, WM_CLOSE, WH_KEYBOARD_LL,
 };
 
-static HOOK: std::sync::Mutex<Option<HhookHolder>> = std::sync::Mutex::new(None);
+use crate::gate::{async_key_is_down, low_level_key_is_release, rising_edge};
+
+static HOOK: Mutex<Option<HhookHolder>> = Mutex::new(None);
+static INSTANCE: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 static PRESSED: AtomicBool = AtomicBool::new(false);
+static OVERLAY: AtomicBool = AtomicBool::new(false);
+static ESC_DOWN: AtomicBool = AtomicBool::new(false);
+static RIGHT_DOWN: AtomicBool = AtomicBool::new(false);
+static PANIC_DOWN: AtomicBool = AtomicBool::new(false);
 static WANT_CTRL: AtomicBool = AtomicBool::new(false);
 static WANT_ALT: AtomicBool = AtomicBool::new(false);
 static WANT_SHIFT: AtomicBool = AtomicBool::new(false);
@@ -25,8 +36,6 @@ static ARMED: AtomicU8 = AtomicU8::new(0);
 struct HhookHolder(HHOOK);
 
 unsafe impl Send for HhookHolder {}
-
-const LLKHF_UP: u32 = 0x80;
 
 pub fn enable_dpi_awareness() {
     unsafe {
@@ -39,15 +48,82 @@ pub fn acquire_single_instance() -> bool {
     unsafe {
         let handle = CreateMutexW(std::ptr::null(), 1, name.as_ptr());
         if handle.is_null() {
-            return true;
-        }
-        if GetLastError() == ERROR_ALREADY_EXISTS {
+            crate::log::log("CreateMutexW failed; not starting a second hotkey handler");
             return false;
         }
-        // Leak the handle so the mutex stays owned until the process exits.
-        std::mem::forget(handle);
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            CloseHandle(handle);
+            return false;
+        }
+        // Keep the handle alive for the process lifetime. Closing it would
+        // drop the mutex and let a second Stillshot install another hook.
+        INSTANCE.store(handle, Ordering::SeqCst);
         true
     }
+}
+
+pub fn set_overlay_active(active: bool) {
+    OVERLAY.store(active, Ordering::SeqCst);
+}
+
+/// Edge-triggered. Esc or right-click while the overlay is up.
+pub fn dismiss_pressed() -> bool {
+    let escape_down = key_down(VK_ESCAPE);
+    let escape = rising_edge(ESC_DOWN.swap(escape_down, Ordering::SeqCst), escape_down);
+    let right_down = key_down(VK_RBUTTON);
+    let right = rising_edge(RIGHT_DOWN.swap(right_down, Ordering::SeqCst), right_down);
+    escape || right
+}
+
+/// Edge-triggered Ctrl+Alt+Q. This is not Ctrl+Shift+Esc and not Ctrl+Alt+Del.
+pub fn panic_quit_pressed() -> bool {
+    let down = key_down(VK_CONTROL) && key_down(VK_MENU) && key_down(0x51);
+    rising_edge(PANIC_DOWN.swap(down, Ordering::SeqCst), down)
+}
+
+pub fn raise_app_windows() {
+    unsafe {
+        EnumWindows(Some(enum_raise), GetCurrentProcessId() as LPARAM);
+    }
+}
+
+pub fn emergency_close_windows() {
+    unsafe {
+        EnumWindows(Some(enum_close), GetCurrentProcessId() as LPARAM);
+        PostQuitMessage(0);
+    }
+}
+
+unsafe extern "system" fn enum_raise(hwnd: HWND, pid: LPARAM) -> i32 {
+    let mut owner = 0u32;
+    GetWindowThreadProcessId(hwnd, &mut owner);
+    if owner == pid as u32 {
+        // Drop topmost so Task Manager, which is also topmost, can cover us.
+        SetWindowPos(
+            hwnd,
+            HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        SetForegroundWindow(hwnd);
+    }
+    1
+}
+
+unsafe extern "system" fn enum_close(hwnd: HWND, pid: LPARAM) -> i32 {
+    let mut owner = 0u32;
+    GetWindowThreadProcessId(hwnd, &mut owner);
+    if owner == pid as u32 {
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    }
+    1
+}
+
+fn key_down(vk: u16) -> bool {
+    unsafe { async_key_is_down(GetAsyncKeyState(vk as i32)) }
 }
 
 pub fn install_print_screen_hook(ctrl: bool, alt: bool, shift: bool, meta: bool) {
@@ -89,10 +165,13 @@ pub fn take_print_screen() -> bool {
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 && ARMED.load(Ordering::SeqCst) == 1 {
         let info = &*(lparam as *const KBDLLHOOKSTRUCT);
-        let is_up = info.flags & LLKHF_UP != 0;
-        if info.vkCode == VK_SNAPSHOT as u32 && !is_up && modifiers_match() {
-            PRESSED.store(true, Ordering::SeqCst);
-            // Swallow the key so Windows does not also open Snipping Tool.
+        if info.vkCode == VK_SNAPSHOT as u32 && modifiers_match() {
+            // Swallow press and release so Snipping Tool does not also open.
+            // Repeats while the overlay is up must not queue another capture:
+            // capture runs on this thread, and a second one stalls the hook.
+            if !low_level_key_is_release(info.flags) && !OVERLAY.load(Ordering::SeqCst) {
+                PRESSED.store(true, Ordering::SeqCst);
+            }
             return 1;
         }
     }
@@ -101,7 +180,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
 fn modifiers_match() -> bool {
     fn down(vk: u16) -> bool {
-        unsafe { GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 }
+        unsafe { async_key_is_down(GetAsyncKeyState(vk as i32)) }
     }
     down(VK_CONTROL) == WANT_CTRL.load(Ordering::SeqCst)
         && down(VK_MENU) == WANT_ALT.load(Ordering::SeqCst)

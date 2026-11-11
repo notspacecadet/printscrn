@@ -6,6 +6,7 @@ use crate::capture::{self, Desktop};
 use crate::clipboard;
 use crate::config::{self, Config};
 use crate::desktop;
+use crate::gate::{self, CaptureGate};
 use crate::geom::output_scale;
 use crate::geom::{RectF, constrain_line, constrain_square};
 use crate::hotkey::{self, print_screen_modifiers};
@@ -16,21 +17,30 @@ use crate::platform;
 use crate::save;
 use anyhow::Result;
 use eframe::egui::{self, Color32, Key, Pos2, Rect, TextureHandle, Vec2};
-use global_hotkey::hotkey::HotKey;
+use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use image::RgbaImage;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIcon, TrayIconBuilder};
 
 static CAPTURE_REQUESTED: AtomicBool = AtomicBool::new(false);
+static PANIC_QUIT: AtomicBool = AtomicBool::new(false);
+static PANIC_HOTKEY_ID: AtomicU32 = AtomicU32::new(u32::MAX);
 static MENU_EVENTS: Mutex<Vec<MenuEvent>> = Mutex::new(Vec::new());
 static UI_CTX: OnceLock<egui::Context> = OnceLock::new();
 
 pub fn request_capture() {
     CAPTURE_REQUESTED.store(true, Ordering::SeqCst);
+    if let Some(ctx) = UI_CTX.get() {
+        ctx.request_repaint();
+    }
+}
+
+pub fn request_panic_quit() {
+    PANIC_QUIT.store(true, Ordering::SeqCst);
     if let Some(ctx) = UI_CTX.get() {
         ctx.request_repaint();
     }
@@ -50,6 +60,9 @@ pub struct App {
     recording: bool,
     manager: GlobalHotKeyManager,
     registered: Option<HotKey>,
+    panic_hotkey: Option<HotKey>,
+    gate: CaptureGate,
+    foreground_requested: bool,
     tray: Option<TrayIcon>,
     tray_capture: MenuId,
     tray_settings: MenuId,
@@ -135,6 +148,9 @@ impl App {
             recording: false,
             manager,
             registered: None,
+            panic_hotkey: None,
+            gate: CaptureGate::new(),
+            foreground_requested: false,
             tray,
             tray_capture,
             tray_settings,
@@ -159,10 +175,31 @@ impl App {
             app.hotkey_error = Some(err);
         }
         spawn_event_threads(cc.egui_ctx.clone());
+        app.ensure_panic_hotkey();
         if launch.capture_now {
-            request_capture();
+            log("ignoring --capture on launch; press the shortcut");
         }
         app
+    }
+
+    fn ensure_panic_hotkey(&mut self) {
+        if self.panic_hotkey.is_some() {
+            return;
+        }
+        let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyQ);
+        let id = hotkey.id();
+        match self.manager.register(hotkey) {
+            Ok(()) => {
+                PANIC_HOTKEY_ID.store(id, Ordering::SeqCst);
+                self.panic_hotkey = Some(hotkey);
+                log("panic hotkey Ctrl+Alt+Q registered");
+            }
+            Err(err) => {
+                log(format!(
+                    "panic hotkey Ctrl+Alt+Q was not registered ({err}); the key poll still works on Windows"
+                ));
+            }
+        }
     }
 
     fn apply_hotkey(&mut self) -> Result<(), String> {
@@ -187,15 +224,25 @@ impl App {
     }
 
     fn begin_capture(&mut self) {
+        let now = Instant::now();
+        if self.session.is_some() || !self.gate.allow(now) {
+            return;
+        }
+        // Set this before the grab so Print Screen auto-repeat cannot queue
+        // another capture on the thread that owns the keyboard hook.
+        platform::set_overlay_active(true);
         if !platform::screen_recording_granted() {
+            platform::set_overlay_active(false);
             self.show_settings = true;
             self.status =
                 "Screen Recording permission is required before Stillshot can freeze the display."
                     .into();
             platform::request_screen_recording();
+            self.gate.on_closed(Instant::now());
             return;
         }
         let started = Instant::now();
+        platform::begin_overlay_watch();
         match capture::capture_desktop() {
             Ok(desktop) => {
                 let n = desktop.monitors.len();
@@ -211,6 +258,8 @@ impl App {
                 self.outers = vec![None; n];
                 self.slot_monitor = (0..n).collect();
                 self.matched = n <= 1;
+                self.foreground_requested = false;
+                self.gate.on_opened();
                 self.session = Some(Session {
                     desktop,
                     selection: None,
@@ -233,6 +282,9 @@ impl App {
             }
             Err(err) => {
                 log(format!("capture failed: {err}"));
+                platform::set_overlay_active(false);
+                platform::end_overlay_watch();
+                self.gate.on_closed(Instant::now());
                 self.status = format!("{err}");
                 self.show_settings = true;
             }
@@ -240,13 +292,20 @@ impl App {
     }
 
     fn close_session(&mut self) {
-        self.session = None;
+        let was_open = self.session.take().is_some();
         self.textures = Textures {
             monitors: Vec::new(),
             crop: None,
             crop_gen: 0,
         };
         self.matched = false;
+        self.foreground_requested = false;
+        if was_open {
+            self.gate.on_closed(Instant::now());
+            platform::set_overlay_active(false);
+            platform::end_overlay_watch();
+            log("overlay closed");
+        }
     }
 }
 
@@ -264,6 +323,11 @@ impl eframe::App for App {
         let _keep_tray_alive = &self.tray;
         self.stamp = self.stamp.wrapping_add(1);
         self.pump_events();
+        if self.quit {
+            self.close_session();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
         if ctx.input(|i| i.viewport().close_requested()) {
             if self.quit {
                 return;
@@ -290,10 +354,31 @@ impl eframe::App for App {
 
 impl App {
     fn pump_events(&mut self) {
-        if CAPTURE_REQUESTED.swap(false, Ordering::SeqCst)
+        if PANIC_QUIT.swap(false, Ordering::SeqCst) || platform::panic_quit_pressed() {
+            log("panic hotkey Ctrl+Alt+Q — closing overlays and quitting");
+            self.close_session();
+            self.quit = true;
+            return;
+        }
+        if self.session.is_some() {
+            let opened = self.session.as_ref().map(|s| s.opened).unwrap_or_else(Instant::now);
+            if platform::dismiss_pressed() {
+                log("dismissing overlay from Esc or right-click");
+                self.close_session();
+            } else if gate::overlay_expired(opened, Instant::now()) {
+                log("overlay auto-closed after 60s");
+                self.close_session();
+            }
+        } else {
+            // Keep the edge detectors in sync so a key held before the overlay
+            // opens does not immediately dismiss it.
+            let _ = platform::dismiss_pressed();
+        }
+        // Always consume triggers. Launch and key-repeat must not open a freeze.
+        let triggered = CAPTURE_REQUESTED.swap(false, Ordering::SeqCst)
             || platform::take_capture_request()
-            || platform::print_screen_pressed()
-        {
+            || platform::print_screen_pressed();
+        if triggered {
             self.begin_capture();
         }
         let events =
@@ -304,6 +389,8 @@ impl App {
             } else if event.id == self.tray_settings {
                 self.show_settings = true;
             } else if event.id == self.tray_quit {
+                log("quit from the tray menu");
+                self.close_session();
                 self.quit = true;
             }
         }
@@ -331,9 +418,17 @@ impl App {
             ctx.show_viewport_immediate(id, builder, |ui, _| {
                 self.paint_overlay(ui.ctx(), slot);
             });
-            if self.session.is_some() && self.stamp < 4 {
+            let young = self
+                .session
+                .as_ref()
+                .is_some_and(|s| s.opened.elapsed() < Duration::from_millis(500));
+            if young {
                 ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
             }
+        }
+        if self.session.is_some() && !self.foreground_requested {
+            self.foreground_requested = true;
+            platform::raise_app_windows();
         }
     }
 
@@ -341,11 +436,12 @@ impl App {
         // `with_monitor` puts a borderless fullscreen window on that display.
         // Setting an explicit size as well fights the fullscreen state and the
         // window drifts by a few pixels on later frames.
+        // Normal z-order, not always-on-top: Task Manager must be able to cover this.
         egui::ViewportBuilder::default()
             .with_title("Stillshot")
             .with_decorations(false)
             .with_resizable(false)
-            .with_always_on_top()
+            .with_window_level(egui::WindowLevel::Normal)
             .with_taskbar(false)
             .with_has_shadow(false)
             .with_visible(true)
@@ -524,7 +620,13 @@ fn spawn_event_threads(ctx: egui::Context) {
     std::thread::spawn(move || {
         loop {
             match GlobalHotKeyEvent::receiver().recv() {
-                Ok(event) if event.state == HotKeyState::Pressed => request_capture(),
+                Ok(event) if event.state == HotKeyState::Pressed => {
+                    if event.id == PANIC_HOTKEY_ID.load(Ordering::SeqCst) {
+                        request_panic_quit();
+                    } else {
+                        request_capture();
+                    }
+                }
                 Ok(_) => {}
                 Err(_) => break,
             }
@@ -594,8 +696,19 @@ impl App {
         if self.key_stamp == self.stamp {
             return;
         }
-        let typing = self.session.as_ref().is_some_and(|s| s.text.is_some());
         let escape = ctx.input(|i| i.key_pressed(Key::Escape));
+        let right = ctx.input(|i| i.pointer.secondary_pressed());
+        if escape || right {
+            self.key_stamp = self.stamp;
+            log(if right {
+                "right-click closed the overlay"
+            } else {
+                "Esc closed the overlay"
+            });
+            self.close_session();
+            return;
+        }
+        let typing = self.session.as_ref().is_some_and(|s| s.text.is_some());
         let enter = ctx.input(|i| i.key_pressed(Key::Enter));
         let command_c = ctx.input(|i| i.modifiers.command && i.key_pressed(Key::C));
         let command_s = ctx.input(|i| i.modifiers.command && i.key_pressed(Key::S));
@@ -609,26 +722,12 @@ impl App {
             i.pointer
                 .button_double_clicked(egui::PointerButton::Primary)
         });
-        if escape || enter || command_c || command_s || undo || redo || double {
+        if enter || command_c || command_s || undo || redo || double {
             self.key_stamp = self.stamp;
         }
         if typing {
-            if escape {
-                if let Some(session) = &mut self.session {
-                    session.text = None;
-                }
-            } else if enter {
+            if enter {
                 self.commit_text();
-            }
-            return;
-        }
-        if escape {
-            if self.session.as_ref().is_some_and(|s| s.draft.is_some()) {
-                if let Some(session) = &mut self.session {
-                    session.draft = None;
-                }
-            } else {
-                self.close_session();
             }
             return;
         }
@@ -1342,7 +1441,7 @@ impl App {
             }
             ui.add_space(16.0);
             ui.separator();
-            ui.label("Drag a region and let go — it copies immediately. Annotate after that if you want; each finished mark updates the clipboard. Enter copies and closes. Esc cancels.");
+            ui.label("Drag a region and let go — it copies immediately. Annotate after that if you want; each finished mark updates the clipboard. Enter copies and closes. Esc, right-click, or waiting 60 seconds closes the overlay. Ctrl+Alt+Q quits Stillshot.");
         });
     }
 

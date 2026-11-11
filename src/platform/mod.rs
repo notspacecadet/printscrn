@@ -2,6 +2,28 @@
 
 use anyhow::{Result, anyhow};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+static OVERLAY_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Start a 60s watchdog before grabbing the screen. If the UI thread is stuck
+/// inside capture, this still exits the process and drops the overlay.
+pub fn begin_overlay_watch() {
+    let generation = OVERLAY_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(60));
+        if OVERLAY_GENERATION.load(Ordering::SeqCst) == generation {
+            crate::log::log("watchdog: overlay still open after 60s; exiting");
+            emergency_close_windows();
+            std::process::exit(2);
+        }
+    });
+}
+
+pub fn end_overlay_watch() {
+    OVERLAY_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
 
 pub fn set_launch_at_login(enabled: bool) -> Result<()> {
     let launch = auto_launch()?;
@@ -151,6 +173,49 @@ pub fn print_screen_pressed() -> bool {
     {
         false
     }
+}
+
+pub fn set_overlay_active(active: bool) {
+    #[cfg(target_os = "windows")]
+    windows::set_overlay_active(active);
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = active;
+    }
+}
+
+/// Esc or right-click, edge-triggered. False on platforms without a poll.
+pub fn dismiss_pressed() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows::dismiss_pressed()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+/// Ctrl+Alt+Q, edge-triggered.
+pub fn panic_quit_pressed() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows::panic_quit_pressed()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+pub fn raise_app_windows() {
+    #[cfg(target_os = "windows")]
+    windows::raise_app_windows();
+}
+
+pub fn emergency_close_windows() {
+    #[cfg(target_os = "windows")]
+    windows::emergency_close_windows();
 }
 
 pub fn enable_dpi_awareness() {

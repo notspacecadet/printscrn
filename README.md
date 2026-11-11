@@ -28,7 +28,9 @@ Read [First launch](#first-launch) before the first open. The builds are unsigne
 2. The screen freezes as it is right now. Drag a rectangle.
 3. Releasing the mouse copies that region to the clipboard. Paste it into Slack, Chrome, Paint, Preview, or anywhere else that accepts an image.
 4. A toolbar appears on the selection if you want to mark it up. Each finished mark updates the clipboard. If you only drag and release, you are done.
-5. Press **Enter** or **Ctrl+C** / **Command-C** to copy the selection, including annotations, and close. **Esc** cancels the current mark, or closes the overlay. Double-click copies the whole display under the pointer.
+5. Press **Enter** or **Ctrl+C** / **Command-C** to copy the selection, including annotations, and close. **Esc** or a right-click closes the overlay immediately. Double-click copies the whole display under the pointer. The overlay also closes itself after 60 seconds.
+
+Stillshot does not freeze the screen when it starts, and it ignores the shortcut while the overlay is already open and for half a second after it closes. **Ctrl+Alt+Q** quits Stillshot and removes the overlay.
 
 Copies are also written to `~/Pictures/Screenshots` (on Windows, your Pictures folder, then `Screenshots`). Files are named like `Screenshot 2026-11-10 at 23.45.01.png`. Turn saving off in Settings.
 
@@ -53,10 +55,11 @@ Toolbar tools: pen, highlighter, line, arrow, rectangle, ellipse, text, blur, pi
 | Freeze the screen | Print Screen on Windows, Command-Shift-2 on Mac |
 | Copy the selection, including annotations, and close | Enter, or Ctrl+C / Command-C |
 | Copy the whole display under the pointer | Double-click |
-| Cancel the current mark, or close | Esc |
+| Close the overlay immediately | Esc, or right-click |
 | Undo | Ctrl+Z / Command-Z |
 | Redo | Ctrl+Shift+Z / Command-Shift-Z, or Ctrl+Y / Command-Y |
 | Save a copy somewhere else | Ctrl+S / Command-S |
+| Quit Stillshot and close the overlay | Ctrl+Alt+Q |
 | Constrain a line, arrow, rectangle, or ellipse | Hold Shift while drawing |
 
 ## First launch
@@ -80,6 +83,8 @@ The first launch asks for **Screen Recording**. Allow it. If the frozen image is
 **macOS.** Quit from the menu bar, then drag `Stillshot.app` from Applications to the Trash. To revoke Screen Recording, open **System Settings → Privacy & Security → Screen Recording** and remove Stillshot.
 
 ## FAQ
+
+**If the frozen screen gets stuck.** Press **Esc**, right-click, or wait up to 60 seconds. The overlay closes on its own. **Ctrl+Alt+Q** quits Stillshot. **Ctrl+Alt+Del** still opens the Windows security screen, and Task Manager can cover the overlay. Quit is also in the tray menu or the Mac menu bar. A log is written to `%LOCALAPPDATA%\Stillshot\stillshot.log` on Windows. Stillshot does not capture when it launches, and a second launch does not start another copy.
 
 **Paste works in a browser but not in Paint, or the other way around.** The copy includes the formats those apps ask for: PNG for browsers and chat apps, and the classic bitmap formats for Paint and other Windows apps. On Mac the pasteboard gets both PNG and TIFF.
 

@@ -224,7 +224,7 @@ fn draw_hints(app: &App, ctx: &egui::Context, _monitor_index: usize, screen: Rec
         egui::Id::unique("hint"),
     ));
     let text = "Drag a region — it copies when you let go";
-    let sub = "Double-click or Enter copies this screen    ·    Esc cancels";
+    let sub = "Double-click or Enter copies this screen    ·    Esc or right-click closes";
     let galley =
         painter.layout_no_wrap(text.to_owned(), FontId::proportional(18.0), Color32::WHITE);
     let subgalley = painter.layout_no_wrap(

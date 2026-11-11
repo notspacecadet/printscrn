@@ -8,6 +8,7 @@ pub mod capture;
 pub mod clipboard;
 pub mod config;
 pub mod desktop;
+pub mod gate;
 pub mod geom;
 pub mod hotkey;
 pub mod icon;
@@ -23,6 +24,7 @@ use std::time::Instant;
 pub fn run() -> eframe::Result {
     platform::enable_dpi_awareness();
     log::init();
+    install_panic_hook();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--self-check") {
         std::process::exit(self_check());
@@ -73,10 +75,11 @@ pub fn run() -> eframe::Result {
     }
 
     if !platform::acquire_single_instance() {
-        log::log("another Stillshot is already running; asking it to capture");
-        platform::signal_capture_request();
+        log::log("another Stillshot is already running; exiting without capturing");
         return Ok(());
     }
+    // A leftover file from an older build must not freeze the screen on startup.
+    let _ = std::fs::remove_file(config::config_dir().join("capture.request"));
 
     let background = args.iter().any(|arg| arg == "--background");
     let capture_now = args.iter().any(|arg| arg == "--capture");
@@ -107,6 +110,15 @@ pub fn run() -> eframe::Result {
         native,
         Box::new(move |cc| Ok(Box::new(app::App::new(cc, launch)))),
     )
+}
+
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::log(format!("panic: {info}"));
+        platform::emergency_close_windows();
+        previous(info);
+    }));
 }
 
 fn self_check() -> i32 {
