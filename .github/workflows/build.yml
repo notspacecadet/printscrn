@@ -29,7 +29,7 @@ jobs:
             libgtk-3-dev libxdo-dev libxcb1-dev libx11-dev libxrandr-dev \
             libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev \
             libpango1.0-dev libatk1.0-dev pkg-config libpipewire-0.3-dev \
-            libxkbcommon-x11-0 libxkbcommon-dev
+            libxkbcommon-x11-0 libxkbcommon-dev libgbm-dev libegl1-mesa-dev
       - name: Test
         run: cargo test --lib
 
@@ -77,7 +77,10 @@ jobs:
 
   macos:
     name: macOS disk image
-    runs-on: macos-latest
+    # macos-latest is the macOS 26 arm64 image. Those runners are being
+    # cancelled before assignment ("not acquired by Runner"). The Intel
+    # image is a separate pool; the script still lipos a universal binary.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
