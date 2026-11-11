@@ -17,12 +17,15 @@ concurrency:
 jobs:
   test:
     name: Linux tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: System packages
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -113,6 +116,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -122,6 +126,7 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           find dist -type f -print
@@ -138,6 +143,7 @@ jobs:
             "$stage/stillshot.exe" \
             "$stage/Stillshot-Setup.exe" \
             "$stage/Stillshot.dmg" \
+            --repo "${GITHUB_REPOSITORY}" \
             --title "Stillshot ${GITHUB_REF_NAME}" \
             --notes "$(cat <<'EOF'
           Windows installer, portable executable, and universal macOS disk image.
