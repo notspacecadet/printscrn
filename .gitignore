@@ -1,0 +1,6 @@
+/target
+/dist
+/agent-tools
+**/*.log
+.DS_Store
+*.pdb

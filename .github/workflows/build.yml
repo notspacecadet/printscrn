@@ -1,0 +1,148 @@
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Linux tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libxdo-dev libxcb1-dev libx11-dev libxrandr-dev \
+            libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev \
+            libpango1.0-dev libatk1.0-dev pkg-config libpipewire-0.3-dev \
+            libxkbcommon-x11-0 libxkbcommon-dev
+      - name: Test
+        run: cargo test --lib
+
+  windows:
+    name: Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --lib
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          $nsis = "${env:ProgramFiles(x86)}\NSIS"
+          if (-not (Test-Path "$nsis\makensis.exe")) {
+            $nsis = "$env:ProgramFiles\NSIS"
+          }
+          if (-not (Test-Path "$nsis\makensis.exe")) {
+            throw "makensis.exe was not installed"
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $nsis
+      - name: Package
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows.ps1
+      - name: Verify Windows artifacts
+        shell: pwsh
+        run: |
+          foreach ($name in @("stillshot.exe", "Stillshot-Setup.exe")) {
+            $path = Join-Path "dist" $name
+            if (-not (Test-Path $path)) { throw "missing $path" }
+            $item = Get-Item $path
+            if ($item.Length -lt 100000) { throw "$path is unexpectedly small ($($item.Length) bytes)" }
+            Write-Host "$path $($item.Length) bytes"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stillshot-windows
+          if-no-files-found: error
+          path: |
+            dist/stillshot.exe
+            dist/Stillshot-Setup.exe
+
+  macos:
+    name: macOS disk image
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --lib
+      - name: Package universal DMG
+        run: bash scripts/build-macos.sh
+      - name: Verify universal binary
+        run: |
+          file dist/stillshot
+          lipo -info dist/stillshot
+          lipo -info dist/stillshot | grep -q x86_64
+          lipo -info dist/stillshot | grep -q arm64
+          test -f dist/Stillshot.dmg
+          test "$(stat -f%z dist/Stillshot.dmg)" -gt 100000
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stillshot-macos
+          if-no-files-found: error
+          path: dist/Stillshot.dmg
+
+  release:
+    name: GitHub Release
+    needs: [windows, macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: stillshot-*
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          find dist -type f -print
+          stage=$(mktemp -d)
+          for name in stillshot.exe Stillshot-Setup.exe Stillshot.dmg; do
+            found=$(find dist -type f -name "$name" | head -n 1)
+            if [ -z "$found" ]; then
+              echo "missing artifact $name" >&2
+              exit 1
+            fi
+            cp "$found" "$stage/$name"
+          done
+          gh release create "${GITHUB_REF_NAME}" \
+            "$stage/stillshot.exe" \
+            "$stage/Stillshot-Setup.exe" \
+            "$stage/Stillshot.dmg" \
+            --title "Stillshot ${GITHUB_REF_NAME}" \
+            --notes "$(cat <<'EOF'
+          Windows installer, portable executable, and universal macOS disk image.
+
+          - Stillshot-Setup.exe installs Stillshot for the current user (no administrator prompt).
+          - stillshot.exe is the portable Windows build.
+          - Stillshot.dmg is a universal macOS disk image (Apple silicon and Intel).
+
+          These builds are unsigned. See the README for SmartScreen and Gatekeeper steps.
+          EOF
+          )"

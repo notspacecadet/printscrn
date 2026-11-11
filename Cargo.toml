@@ -1,0 +1,64 @@
+[package]
+name = "stillshot"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Freeze-frame screenshot tool for Windows and macOS"
+license = "MIT OR Apache-2.0"
+authors = ["Stillshot"]
+readme = "README.md"
+
+[lib]
+name = "stillshot"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stillshot"
+path = "src/main.rs"
+
+[dependencies]
+ab_glyph = "0.2"
+anyhow = "1"
+arboard = { version = "3.6", features = ["image-data"] }
+auto-launch = "0.6"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dirs = "6"
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+global-hotkey = "0.10"
+image = { version = "0.25", default-features = false, features = ["png", "tiff"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+xcap = "0.9"
+rfd = "0.15"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSImage"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSString"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
